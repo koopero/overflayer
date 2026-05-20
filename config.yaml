@@ -1,0 +1,58 @@
+# Overflayer config
+# Server defines the Minecraft endpoint all clients connect to.
+# Each entry under `players` spawns one bot with its own snippets.
+
+server:
+  host: localhost
+  port: 25565
+  version: auto   # or e.g. "1.20.4"
+
+players:
+  - username: January
+    auth: offline
+    load: []
+
+  - username: February
+    auth: offline
+    load: []
+
+
+  - username: March
+    auth: offline
+    load: []
+
+  - username: April
+    auth: offline
+    load: [] 
+
+  - username: May
+    auth: offline
+    load: []
+
+  - username: June
+    auth: offline
+    load: []
+
+  - username: July
+    auth: offline
+    load: []  
+
+  - username: August
+    auth: offline
+    load: []
+
+  - username: September
+    auth: offline
+    load: []
+
+  - username: October
+    auth: offline
+    load: []
+
+  - username: November
+    auth: offline
+    load: []
+
+  - username: December
+    auth: offline
+    load: []

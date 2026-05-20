@@ -1,0 +1,378 @@
+'use strict'
+
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const assert = require('assert')
+const { EventEmitter } = require('events')
+
+const Overflayer = require('..')
+const { ScopeDisposedError } = require('..')
+
+function makeFakeBot () {
+  const bot = new EventEmitter()
+  bot.username = 'TestBot'
+  bot.chat = (msg) => { bot.lastChat = msg; bot.emit('_chatSent', msg) }
+  bot.entity = { position: { x: 0, y: 64, z: 0 } }
+  bot.players = {}
+  bot.inventory = { items: () => [] }
+  bot.food = 20
+  return bot
+}
+
+function delay (ms) { return new Promise(r => setTimeout(r, ms)) }
+
+let passed = 0
+let failed = 0
+async function test (name, fn) {
+  try {
+    await fn()
+    passed++
+    console.log(`  ok  ${name}`)
+  } catch (err) {
+    failed++
+    console.error(`  FAIL ${name}\n      ${err && err.stack ? err.stack : err}`)
+  }
+}
+
+async function main () {
+  console.log('Overflayer smoke tests')
+
+  // --- 1. Inline load + chat listener fires
+  await test('inline snippet: chat listener responds', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('greeter', `bot.on('chat', (u, m) => { if (m === 'hi') bot.chat('hello ' + u) })`)
+    bot.emit('chat', 'alice', 'hi')
+    await delay(10)
+    assert.strictEqual(bot.lastChat, 'hello alice')
+    await ov.close()
+  })
+
+  // --- 2. Listener tracking + cleanup on unload
+  await test('unload removes only this snippet\'s listeners', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    // Pre-existing host listener — must survive unload.
+    let hostHits = 0
+    bot.on('chat', () => hostHits++)
+
+    await ov.load('s', `bot.on('chat', () => bot.chat('s-fired'))`)
+    assert.strictEqual(bot.listenerCount('chat'), 2)
+
+    bot.emit('chat', 'a', 'x')
+    await delay(5)
+    assert.strictEqual(bot.lastChat, 's-fired')
+    assert.strictEqual(hostHits, 1)
+
+    assert.strictEqual(ov.unload('s'), true)
+    assert.strictEqual(bot.listenerCount('chat'), 1)
+
+    bot.lastChat = null
+    bot.emit('chat', 'a', 'x')
+    await delay(5)
+    assert.strictEqual(bot.lastChat, null, 'snippet listener should be gone')
+    assert.strictEqual(hostHits, 2, 'host listener should still run')
+  })
+
+  // --- 3. Hot reload replaces listeners
+  await test('hot reload replaces listeners', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('s', `bot.on('chat', () => bot.chat('v1'))`)
+    bot.emit('chat', 'a', 'x'); await delay(5)
+    assert.strictEqual(bot.lastChat, 'v1')
+
+    await ov.load('s', `bot.on('chat', () => bot.chat('v2'))`)
+    assert.strictEqual(bot.listenerCount('chat'), 1)
+    bot.emit('chat', 'a', 'x'); await delay(5)
+    assert.strictEqual(bot.lastChat, 'v2')
+    await ov.close()
+  })
+
+  // --- 4. sleep() rejects with ScopeDisposedError on unload
+  await test('sleep rejects with ScopeDisposedError when snippet is unloaded', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let observed = null
+    await ov.load('s', `
+      run(async () => {
+        try { await sleep(5000) }
+        catch (e) { bot.emit('_sleepResult', e) }
+      })
+    `)
+    bot.on('_sleepResult', (e) => { observed = e })
+    await delay(10)
+    ov.unload('s')
+    await delay(20)
+    assert.ok(observed instanceof Error, 'should observe rejection')
+    assert.strictEqual(observed.name, 'ScopeDisposedError')
+  })
+
+  // --- 5. interval cleared on unload
+  await test('interval is cleared on unload', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let ticks = 0
+    bot.tick = () => ticks++
+    await ov.load('s', `interval(10, () => bot.tick())`)
+    await delay(55)
+    const before = ticks
+    assert.ok(before >= 2, 'interval should fire multiple times')
+    ov.unload('s')
+    await delay(50)
+    assert.strictEqual(ticks, before, 'interval should not fire after unload')
+  })
+
+  // --- 6. Blocked globals are undefined
+  await test('blocked globals (require, process, ...) are undefined inside snippet', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let captured = null
+    bot.report = (v) => { captured = v }
+    await ov.load('s', `
+      bot.report({
+        require: typeof require,
+        process: typeof process,
+        module: typeof module,
+        __dirname: typeof __dirname,
+        __filename: typeof __filename,
+        global: typeof global,
+        exports: typeof exports
+      })
+    `)
+    assert.deepStrictEqual(captured, {
+      require: 'undefined', process: 'undefined', module: 'undefined',
+      __dirname: 'undefined', __filename: 'undefined', global: 'undefined', exports: 'undefined'
+    })
+  })
+
+  // --- 7. inject extra globals
+  await test('options.inject merges into snippet globals', async () => {
+    const bot = makeFakeBot()
+    const myThing = { ping: () => 'pong' }
+    const ov = new Overflayer(bot, { inject: { myThing } })
+    let result = null
+    bot.report = (v) => { result = v }
+    await ov.load('s', `bot.report(myThing.ping())`)
+    assert.strictEqual(result, 'pong')
+  })
+
+  // --- 8. errorHandler captures listener exceptions; bot stays up
+  await test('runtime listener errors are routed to errorHandler', async () => {
+    const bot = makeFakeBot()
+    const errors = []
+    const ov = new Overflayer(bot, {
+      errorHandler: (id, err) => errors.push([id, err.message])
+    })
+    await ov.load('boom', `bot.on('chat', () => { throw new Error('kaboom') })`)
+    bot.emit('chat', 'a', 'x')
+    await delay(10)
+    assert.strictEqual(errors.length, 1)
+    assert.strictEqual(errors[0][0], 'boom')
+    assert.match(errors[0][1], /kaboom/)
+  })
+
+  // --- 9. Sync load error rejects the load promise
+  await test('synchronous load error rejects load() and registers nothing', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let threw = null
+    try { await ov.load('bad', `throw new Error('nope')`) } catch (e) { threw = e }
+    assert.ok(threw, 'should reject')
+    assert.match(threw.message, /nope/)
+    assert.deepStrictEqual(ov.inspect(), [])
+  })
+
+  // --- 10. Load from file + reload from disk
+  await test('load from file path and reload re-reads disk', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-'))
+    const file = path.join(dir, 'greeter.js')
+    fs.writeFileSync(file, `bot.on('chat', () => bot.chat('disk-v1'))`)
+    await ov.load('greeter', file)
+    bot.emit('chat', 'a', 'x'); await delay(5)
+    assert.strictEqual(bot.lastChat, 'disk-v1')
+
+    fs.writeFileSync(file, `bot.on('chat', () => bot.chat('disk-v2'))`)
+    await ov.reload('greeter')
+    bot.emit('chat', 'a', 'x'); await delay(5)
+    assert.strictEqual(bot.lastChat, 'disk-v2')
+
+    await ov.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  // --- 11. inspect()
+  await test('inspect() reports id, source, listenerCount', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('a', `bot.on('chat', () => {}); bot.on('move', () => {})`)
+    await ov.load('b', `bot.on('chat', () => {})`)
+    const snap = ov.inspect()
+    const a = snap.find(s => s.id === 'a')
+    const b = snap.find(s => s.id === 'b')
+    assert.strictEqual(a.listenerCount, 2)
+    assert.strictEqual(b.listenerCount, 1)
+    assert.strictEqual(a.source, '<inline>')
+    assert.ok(typeof a.loadedAt === 'number')
+    await ov.close()
+  })
+
+  // --- 12. bot.end() and bot.quit() are denied
+  await test('bot.end() / bot.quit() throw in snippet scope', async () => {
+    const bot = makeFakeBot()
+    bot.end = () => { throw new Error('should not be called') }
+    bot.quit = () => { throw new Error('should not be called') }
+    const errors = []
+    const ov = new Overflayer(bot, { errorHandler: (id, e) => errors.push(e.message) })
+    let threw = null
+    try {
+      await ov.load('bad', `bot.end()`)
+    } catch (e) { threw = e }
+    assert.ok(threw, 'sync throw should propagate')
+    assert.match(threw.message, /not available in snippet scope/)
+  })
+
+  // --- 13. Watcher autoloads + reloads from a directory (uses chokidar)
+  await test('watcher autoloads files and reloads on change', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot, { watchDebounce: 30 })
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-watch-'))
+    const file = path.join(dir, 'hi.js')
+    fs.writeFileSync(file, `bot.on('chat', () => bot.chat('w-v1'))`)
+    const watcher = ov.watch(dir)
+    // Wait for autoLoad
+    for (let i = 0; i < 50 && !ov.snippets.has('hi'); i++) await delay(20)
+    assert.ok(ov.snippets.has('hi'), 'should autoload existing file')
+    bot.emit('chat', 'a', 'x'); await delay(5)
+    assert.strictEqual(bot.lastChat, 'w-v1')
+
+    // Modify the file
+    fs.writeFileSync(file, `bot.on('chat', () => bot.chat('w-v2'))`)
+    // Wait for debounce + reload
+    let got = null
+    for (let i = 0; i < 80; i++) {
+      bot.lastChat = null
+      bot.emit('chat', 'a', 'x')
+      await delay(5)
+      if (bot.lastChat === 'w-v2') { got = bot.lastChat; break }
+      await delay(20)
+    }
+    assert.strictEqual(got, 'w-v2', 'watcher should reload on change')
+
+    // Delete the file
+    fs.unlinkSync(file)
+    for (let i = 0; i < 50 && ov.snippets.has('hi'); i++) await delay(20)
+    assert.ok(!ov.snippets.has('hi'), 'watcher should unload on remove')
+
+    await watcher.stop()
+    await ov.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  // --- 14. ScopeDisposedError is exported and recognizable inside snippets
+  await test('ScopeDisposedError is catchable inside snippets', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let result = null
+    bot.report = (v) => { result = v }
+    await ov.load('s', `
+      run(async () => {
+        try { await sleep(5000) }
+        catch (e) { bot.report(e instanceof ScopeDisposedError ? 'caught' : 'other:' + e.name) }
+      })
+    `)
+    await delay(10)
+    ov.unload('s')
+    await delay(20)
+    assert.strictEqual(result, 'caught')
+    assert.ok(ScopeDisposedError.prototype instanceof Error)
+  })
+
+  // --- 16. stop(): snippet can request self-unload
+  await test('stop() unloads the snippet and emits stop + unload', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const stops = []
+    const unloads = []
+    ov.on('stop', (id, reason) => stops.push([id, reason]))
+    ov.on('unload', (id) => unloads.push(id))
+
+    await ov.load('selfstop', `
+      bot.on('chat', (u, m) => {
+        if (m === 'die') stop('asked to die')
+      })
+    `)
+    assert.strictEqual(bot.listenerCount('chat'), 1)
+    bot.emit('chat', 'a', 'die')
+    await delay(15)
+    assert.deepStrictEqual(stops, [['selfstop', 'asked to die']])
+    assert.deepStrictEqual(unloads, ['selfstop'])
+    assert.strictEqual(bot.listenerCount('chat'), 0)
+    assert.strictEqual(ov.inspect().length, 0)
+  })
+
+  await test('stop() inside run() lets the current frame finish', async () => {
+    const bot = makeFakeBot()
+    let after = false
+    bot.markAfter = () => { after = true }
+    const ov = new Overflayer(bot)
+    await ov.load('s', `
+      run(async () => {
+        stop('done')
+        // Synchronous code following stop() should still run; only the next
+        // tick disposes the scope.
+        bot.markAfter()
+      })
+    `)
+    await delay(15)
+    assert.strictEqual(after, true, 'code after stop() in the same tick should still execute')
+    assert.strictEqual(ov.inspect().length, 0, 'snippet should be unloaded by now')
+  })
+
+  await test('stop() is idempotent (calling twice does nothing extra)', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const stops = []
+    ov.on('stop', (id, reason) => stops.push(reason))
+    await ov.load('s', `stop('first'); stop('second')`)
+    await delay(15)
+    assert.deepStrictEqual(stops, ['first'])
+    assert.strictEqual(ov.inspect().length, 0)
+  })
+
+  // --- 15. report(): snippets push data up to Overflayer
+  await test('report() emits on overflayer and updates inspect()', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const seen = []
+    ov.on('report', (id, payload) => seen.push([id, payload]))
+    await ov.load('r', `
+      report('hello')
+      report({ x: 1, y: 2 })
+      report('a', 'b', 'c')
+    `)
+    await delay(10)
+    assert.deepStrictEqual(seen[0], ['r', 'hello'])
+    assert.deepStrictEqual(seen[1], ['r', { x: 1, y: 2 }])
+    assert.deepStrictEqual(seen[2], ['r', ['a', 'b', 'c']])
+
+    const snap = ov.inspect()[0]
+    assert.strictEqual(snap.reportCount, 3)
+    assert.deepStrictEqual(snap.lastReport, ['a', 'b', 'c'])
+    assert.ok(typeof snap.lastReportAt === 'number')
+
+    // After unload, late report() calls are no-ops.
+    ov.unload('r')
+    await delay(5)
+    // Nothing further added:
+    assert.strictEqual(seen.length, 3)
+  })
+
+  console.log(`\n${passed} passed, ${failed} failed`)
+  if (failed > 0) process.exit(1)
+}
+
+main().catch(err => { console.error(err); process.exit(1) })
