@@ -45,18 +45,11 @@ class Overflayer extends EventEmitter {
     if (!bot) throw new TypeError('new Overflayer(bot, options): bot is required')
     this.bot = bot
     this.options = { ...DEFAULT_OPTIONS, ...options, inject: { ...(options.inject || {}) } }
-    this.snippets = new Map() // id -> { scope, source, loadedAt, getListenerCount }
+    this.snippets = new Map() // id -> { scope, source, loadedAt, getListenerCount, declaredStateKeys }
     this._watchers = new Set()
-    this._state = new Map() // snippetId -> { schema: {key: {type, export, default}}, values: {key: value} }
-    // Prevent EventEmitter's default throw-on-unhandled-error behavior:
-    // errors are always routed through options.errorHandler too.
+    // Player-level state: Map<key, { value, schema: { type, export, default, declaredBy: Set<snippetId> } | null }>
+    this._state = new Map()
     this.on('error', () => {})
-  }
-
-  _getOrCreateStateSlot (id) {
-    let slot = this._state.get(id)
-    if (!slot) { slot = { schema: {}, values: {} }; this._state.set(id, slot) }
-    return slot
   }
 
   _typeCheck (type, value) {
@@ -67,29 +60,32 @@ class Overflayer extends EventEmitter {
       case 'boolean': return typeof value === 'boolean'
       case 'player':  return typeof value === 'string'
       case 'vec3':    return value && typeof value.x === 'number' && typeof value.y === 'number' && typeof value.z === 'number'
-      default:        return true // opaque
+      default:        return true
     }
   }
 
-  setExportedState (id, key, value) {
-    const slot = this._state.get(id)
-    if (!slot || !slot.schema[key]) {
-      throw new Error(`state key "${key}" is not configured for snippet "${id}"`)
+  // Set an exported player-state key from outside (API / operator).
+  setExportedState (key, value) {
+    const entry = this._state.get(key)
+    if (!entry || !entry.schema) {
+      throw new Error(`state key "${key}" is not configured`)
     }
-    if (!slot.schema[key].export) {
+    if (!entry.schema.export) {
       throw new Error(`state key "${key}" is not exported`)
     }
-    if (!this._typeCheck(slot.schema[key].type, value)) {
-      throw new Error(`value for "${key}" does not match type ${slot.schema[key].type}`)
+    if (!this._typeCheck(entry.schema.type, value)) {
+      throw new Error(`value for "${key}" does not match type ${entry.schema.type}`)
     }
-    slot.values[key] = value
-    this.emit('state', id, key, value, { source: 'api', exported: true })
+    entry.value = value
+    this.emit('state', key, value, { source: 'api', exported: true })
     return value
   }
 
-  preset (id, key, value) {
-    const slot = this._getOrCreateStateSlot(id)
-    slot.values[key] = value
+  // Pre-set a player-state value before any behavior has declared the key.
+  preset (key, value) {
+    let entry = this._state.get(key)
+    if (!entry) { entry = { value: undefined, schema: null }; this._state.set(key, entry) }
+    entry.value = value
   }
 
   async load (id, source) {
@@ -125,6 +121,9 @@ class Overflayer extends EventEmitter {
       })
     }
 
+    // Track which player-state keys this behavior declares (for cleanup on unload).
+    const declaredStateKeys = new Set()
+
     const entry = {
       scope,
       source: storedSource,
@@ -133,7 +132,8 @@ class Overflayer extends EventEmitter {
       getListenerCount,
       reportCount: 0,
       lastReport: undefined,
-      lastReportAt: undefined
+      lastReportAt: undefined,
+      declaredStateKeys
     }
 
     const report = (...args) => {
@@ -151,57 +151,73 @@ class Overflayer extends EventEmitter {
       stopRequested = true
       entry.stoppedReason = reason
       this.emit('stop', id, reason)
-      // Defer so the caller's current frame can finish before its scope is torn down.
       queueMicrotask(() => {
         if (this.snippets.get(id) === entry) this.unload(id)
       })
     }
 
-    const slot = this._getOrCreateStateSlot(id)
     const warn = (msg) => {
       const err = new Error(msg)
       this.emit('error', id, err)
       try { this.options.errorHandler(id, err) } catch (_) {}
     }
-    const stateConfigure = (key, opts = {}) => {
-      if (typeof key !== 'string' || !key) throw new TypeError('stateConfigure: key must be a non-empty string')
+
+    // Declare a player-state key this behavior reads/writes. Shared across behaviors
+    // that declare the same key — intentional key sharing is how behaviors coordinate.
+    const declareState = (key, opts = {}) => {
+      if (typeof key !== 'string' || !key) throw new TypeError('declareState: key must be a non-empty string')
       const { type = 'string', export: exported = false, default: dflt } = opts
-      const prev = slot.schema[key]
-      slot.schema[key] = { type, export: !!exported, default: dflt }
-      if (!(key in slot.values)) {
-        // First-time configuration — initialise from default.
+
+      declaredStateKeys.add(key)
+
+      let stateEntry = this._state.get(key)
+      if (!stateEntry) {
+        stateEntry = { value: undefined, schema: { type, export: !!exported, default: dflt, declaredBy: new Set() } }
+        this._state.set(key, stateEntry)
         const initial = typeof dflt === 'function' ? dflt() : dflt
         if (initial !== undefined) {
-          if (!this._typeCheck(type, initial)) {
-            warn(`stateConfigure("${key}"): default does not match type ${type}; storing anyway`)
-          }
-          slot.values[key] = initial
-          this.emit('state', id, key, initial, { source: 'default', exported: !!exported })
+          stateEntry.value = initial
+          this.emit('state', key, initial, { source: 'default', snippetId: id, exported: !!exported })
         }
-      } else if (prev && prev.type !== type && !this._typeCheck(type, slot.values[key])) {
-        // Existing value, type changed, value incompatible — keep old value, warn.
-        warn(`stateConfigure("${key}"): new type ${type} incompatible with existing value; preserving old value`)
+      } else {
+        if (!stateEntry.schema) {
+          // Was preset without a schema — attach schema now.
+          stateEntry.schema = { type, export: !!exported, default: dflt, declaredBy: new Set() }
+        } else {
+          if (stateEntry.schema.type !== type) {
+            warn(`declareState("${key}"): type conflict — existing: ${stateEntry.schema.type}, new: ${type}; keeping existing`)
+          }
+          if (exported) stateEntry.schema.export = true
+        }
+        // Apply default only if value is still unset.
+        if (stateEntry.value === undefined) {
+          const initial = typeof dflt === 'function' ? dflt() : dflt
+          if (initial !== undefined) {
+            stateEntry.value = initial
+            this.emit('state', key, initial, { source: 'default', snippetId: id, exported: !!exported })
+          }
+        }
       }
+      stateEntry.schema.declaredBy.add(id)
     }
-    const stateGet = (key) => slot.values[key]
+
+    const stateGet = (key) => this._state.get(key)?.value
+
     const stateSet = (key, value) => {
-      if (!slot.schema[key]) {
-        throw new Error(`stateSet("${key}"): key is not configured. Call stateConfigure first.`)
+      const stateEntry = this._state.get(key)
+      if (!stateEntry || !stateEntry.schema) {
+        throw new Error(`stateSet("${key}"): key is not configured. Call declareState first.`)
       }
-      if (!this._typeCheck(slot.schema[key].type, value)) {
-        warn(`stateSet("${key}"): value does not match type ${slot.schema[key].type}; storing anyway`)
+      if (!this._typeCheck(stateEntry.schema.type, value)) {
+        warn(`stateSet("${key}"): value does not match type ${stateEntry.schema.type}; storing anyway`)
       }
-      slot.values[key] = value
-      this.emit('state', id, key, value, { source: 'snippet', exported: !!slot.schema[key].export })
+      stateEntry.value = value
+      this.emit('state', key, value, { source: 'snippet', snippetId: id, exported: !!stateEntry.schema.export })
       return value
     }
 
     const resolver = this.options.inject?._catalogResolver ?? null
 
-    // Load a snippet by catalog ID (or explicit source path), with optional initial state.
-    // snippetLoad('provision')
-    // snippetLoad('provision', { output_chest: { x, y, z } })
-    // snippetLoad('provision', '/path/to/provision.js', { output_chest: { x, y, z } })
     const snippetLoad = async (targetId, sourceOrState, maybeState) => {
       let src, initialState
       if (typeof sourceOrState === 'string' || sourceOrState == null) {
@@ -214,20 +230,15 @@ class Overflayer extends EventEmitter {
       if (!src) throw new Error(`snippetLoad("${targetId}"): not found in catalog`)
       await this.load(targetId, src)
       if (initialState && typeof initialState === 'object') {
-        const slot = this._state.get(targetId)
-        if (slot) {
-          for (const [k, v] of Object.entries(initialState)) {
-            if (slot.schema[k]) {
-              slot.values[k] = v
-              this.emit('state', targetId, k, v, { source: 'snippetLoad', exported: !!slot.schema[k].export })
-            }
-          }
+        for (const [k, v] of Object.entries(initialState)) {
+          let se = this._state.get(k)
+          if (!se) { se = { value: undefined, schema: null }; this._state.set(k, se) }
+          se.value = v
+          this.emit('state', k, v, { source: 'snippetLoad', snippetId: targetId })
         }
       }
     }
 
-    // Unload by ID, or unload self when called with no argument.
-    // Defaults keepState:true so state survives snippet hand-off cycles.
     const snippetUnload = (targetId, { keepState = true } = {}) => {
       queueMicrotask(() => this.unload(targetId ?? id, { keepState }))
     }
@@ -239,7 +250,7 @@ class Overflayer extends EventEmitter {
       run: utils.run,
       report,
       stop,
-      stateConfigure,
+      declareState,
       stateGet,
       stateSet,
       signal: scope.signal,
@@ -272,11 +283,23 @@ class Overflayer extends EventEmitter {
     const entry = this.snippets.get(id)
     if (!entry) return false
     this.snippets.delete(id)
+    // Remove this behavior from declaredBy for each key it declared.
+    for (const key of entry.declaredStateKeys) {
+      const se = this._state.get(key)
+      if (se?.schema) se.schema.declaredBy.delete(id)
+    }
+    // keepState=false: clear keys that no other behavior has declared.
+    // Player state persists by default (keepState=true); explicit unload prunes orphaned keys.
+    if (!keepState) {
+      for (const key of entry.declaredStateKeys) {
+        const se = this._state.get(key)
+        if (se?.schema && se.schema.declaredBy.size === 0) this._state.delete(key)
+      }
+    }
     try { entry.scope.dispose() } catch (err) {
       this.emit('error', id, err)
       try { this.options.errorHandler(id, err) } catch (_) {}
     }
-    if (!keepState) this._state.delete(id)
     this.emit('unload', id)
     return true
   }
@@ -301,16 +324,10 @@ class Overflayer extends EventEmitter {
     return watcher
   }
 
+  // Snapshot of all loaded behaviors.
   inspect () {
     const out = []
     for (const [id, entry] of this.snippets) {
-      const slot = this._state.get(id)
-      const state = {}
-      if (slot) {
-        for (const [key, schema] of Object.entries(slot.schema)) {
-          state[key] = { type: schema.type, value: slot.values[key], exported: !!schema.export }
-        }
-      }
       out.push({
         id,
         source: entry.source,
@@ -321,8 +338,22 @@ class Overflayer extends EventEmitter {
         reportCount: entry.reportCount,
         lastReport: entry.lastReport,
         lastReportAt: entry.lastReportAt,
-        state
+        declaredState: [...entry.declaredStateKeys]
       })
+    }
+    return out
+  }
+
+  // Snapshot of this player's state (union of all loaded behaviors' declared keys + presets).
+  playerState () {
+    const out = {}
+    for (const [key, se] of this._state) {
+      out[key] = {
+        value: se.value,
+        type: se.schema?.type ?? 'string',
+        exported: !!(se.schema?.export),
+        declaredBy: se.schema?.declaredBy ? [...se.schema.declaredBy] : []
+      }
     }
     return out
   }

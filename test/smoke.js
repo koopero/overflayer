@@ -343,28 +343,28 @@ async function main () {
     assert.strictEqual(ov.inspect().length, 0)
   })
 
-  // --- state(): per-snippet, per-instance state with hot-reload persistence
-  await test('stateConfigure initialises from default', async () => {
+  // --- state(): player-level state shared across behaviors
+  await test('declareState initialises from default', async () => {
     const bot = makeFakeBot()
     const ov = new Overflayer(bot)
     let captured = null
     bot.report = (v) => { captured = v }
     await ov.load('s', `
-      stateConfigure('target', { type: 'player', default: 'rotiboater', export: true })
+      declareState('target', { type: 'player', default: 'rotiboater', export: true })
       bot.report(stateGet('target'))
     `)
     assert.strictEqual(captured, 'rotiboater')
-    const snap = ov.inspect()[0]
-    assert.deepStrictEqual(snap.state.target, { type: 'player', value: 'rotiboater', exported: true })
+    const ps = ov.playerState()
+    assert.deepStrictEqual(ps.target, { type: 'player', value: 'rotiboater', exported: true, declaredBy: ['s'] })
   })
 
-  await test('stateGet/stateSet read and write inside the snippet', async () => {
+  await test('stateGet/stateSet read and write player-level state', async () => {
     const bot = makeFakeBot()
     const ov = new Overflayer(bot)
     const log = []
     bot.log = (v) => log.push(v)
     await ov.load('s', `
-      stateConfigure('count', { type: 'number', default: 0 })
+      declareState('count', { type: 'number', default: 0 })
       bot.log(stateGet('count'))
       stateSet('count', 5)
       bot.log(stateGet('count'))
@@ -376,52 +376,75 @@ async function main () {
     const bot = makeFakeBot()
     const ov = new Overflayer(bot)
     await ov.load('s', `
-      stateConfigure('count', { type: 'number', default: 0 })
+      declareState('count', { type: 'number', default: 0 })
       stateSet('count', 7)
     `)
-    assert.strictEqual(ov.inspect()[0].state.count.value, 7)
-    // Hot-reload — same id, fresh code that reconfigures the same key.
+    assert.strictEqual(ov.playerState().count.value, 7)
     let observed = null
     bot.report = (v) => { observed = v }
     await ov.load('s', `
-      stateConfigure('count', { type: 'number', default: 0 })
+      declareState('count', { type: 'number', default: 0 })
       bot.report(stateGet('count'))
     `)
     assert.strictEqual(observed, 7, 'value should survive hot-reload')
-    assert.strictEqual(ov.inspect()[0].state.count.value, 7)
+    assert.strictEqual(ov.playerState().count.value, 7)
   })
 
-  await test('explicit unload() drops state (no keepState)', async () => {
+  await test('player state persists across explicit unload (player-level semantics)', async () => {
     const bot = makeFakeBot()
     const ov = new Overflayer(bot)
-    await ov.load('s', `stateConfigure('x', { type: 'number', default: 1 }); stateSet('x', 99)`)
-    assert.strictEqual(ov.inspect()[0].state.x.value, 99)
-    ov.unload('s')
+    await ov.load('s', `declareState('x', { type: 'number', default: 1 }); stateSet('x', 99)`)
+    assert.strictEqual(ov.playerState().x.value, 99)
+    // Explicit unload with keepState=true (default for hot-reload path) — value survives.
+    ov.unload('s', { keepState: true })
     let observed = null
     bot.report = (v) => { observed = v }
-    await ov.load('s', `stateConfigure('x', { type: 'number', default: 1 }); bot.report(stateGet('x'))`)
-    assert.strictEqual(observed, 1, 'after explicit unload, state resets to default')
+    await ov.load('s', `declareState('x', { type: 'number', default: 1 }); bot.report(stateGet('x'))`)
+    assert.strictEqual(observed, 99, 'player-level state survives reload')
+  })
+
+  await test('explicit unload without keepState prunes undeclared keys', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('s', `declareState('x', { type: 'number', default: 1 }); stateSet('x', 99)`)
+    assert.strictEqual(ov.playerState().x.value, 99)
+    ov.unload('s') // keepState defaults to false — prunes orphaned key
+    assert.strictEqual(ov.playerState().x, undefined, 'orphaned key removed on explicit unload')
+    let observed = null
+    bot.report = (v) => { observed = v }
+    await ov.load('s', `declareState('x', { type: 'number', default: 1 }); bot.report(stateGet('x'))`)
+    assert.strictEqual(observed, 1, 'fresh load gets default after prune')
+  })
+
+  await test('two behaviors sharing a key read the same value', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('a', `declareState('target', { type: 'player', export: true, default: 'alice' })`)
+    await ov.load('b', `declareState('target', { type: 'player', export: true })`)
+    // Both declare same key — value set by a persists for b
+    assert.strictEqual(ov.playerState().target.value, 'alice')
+    assert.deepStrictEqual(ov.playerState().target.declaredBy.sort(), ['a', 'b'])
   })
 
   await test('setExportedState rejects non-exported keys, accepts exported', async () => {
     const bot = makeFakeBot()
     const ov = new Overflayer(bot)
     const stateEvents = []
-    ov.on('state', (id, key, value, meta) => stateEvents.push({ id, key, value, source: meta.source }))
+    ov.on('state', (key, value, meta) => stateEvents.push({ key, value, source: meta.source }))
     await ov.load('s', `
-      stateConfigure('priv', { type: 'string', default: 'a' })
-      stateConfigure('pub',  { type: 'string', default: 'b', export: true })
+      declareState('priv', { type: 'string', default: 'a' })
+      declareState('pub',  { type: 'string', default: 'b', export: true })
     `)
 
-    assert.throws(() => ov.setExportedState('s', 'priv', 'x'), /not exported/)
-    assert.throws(() => ov.setExportedState('s', 'missing', 'x'), /not configured/)
+    assert.throws(() => ov.setExportedState('priv', 'x'), /not exported/)
+    assert.throws(() => ov.setExportedState('missing', 'x'), /not configured/)
 
     const before = stateEvents.length
-    ov.setExportedState('s', 'pub', 'updated')
-    assert.strictEqual(ov.inspect()[0].state.pub.value, 'updated')
+    ov.setExportedState('pub', 'updated')
+    assert.strictEqual(ov.playerState().pub.value, 'updated')
     const newEvts = stateEvents.slice(before)
     assert.strictEqual(newEvts.length, 1)
-    assert.deepStrictEqual(newEvts[0], { id: 's', key: 'pub', value: 'updated', source: 'api' })
+    assert.deepStrictEqual(newEvts[0], { key: 'pub', value: 'updated', source: 'api' })
   })
 
   // --- 15. report(): snippets push data up to Overflayer

@@ -1,5 +1,5 @@
-stateConfigure('target', { type: 'player', export: true, default: 'rotiboater' })
-stateConfigure('radius', { type: 'number', export: true, default: 2 })
+declareState('target', { type: 'player', export: true, default: 'rotiboater' })
+declareState('radius', { type: 'number', export: true, default: 2 })
 
 run(async () => {
   if (!bot.pathfinder || !GoalNear) {

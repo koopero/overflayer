@@ -5,13 +5,13 @@ export default defineEventHandler(async (event) => {
   if (!body || typeof body !== 'object') {
     throw createError({ statusCode: 400, statusMessage: 'JSON body required' })
   }
-  const { targets, id, key, value } = body as any
-  if (!id || !key) {
-    throw createError({ statusCode: 400, statusMessage: 'id and key are required' })
+  const { targets, key, value } = body as any
+  if (!key) {
+    throw createError({ statusCode: 400, statusMessage: 'key is required' })
   }
   try {
-    const results = manager().setState({ targets, id, key, value })
-    return { id, key, results }
+    const results = manager().setState({ targets, key, value })
+    return { key, results }
   } catch (err: any) {
     throw createError({ statusCode: 400, statusMessage: err.message })
   }

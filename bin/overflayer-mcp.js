@@ -165,15 +165,14 @@ const TOOLS = [
   },
   {
     name: 'set_state',
-    description: 'Set an exported state value on a loaded snippet for one or more bots.',
+    description: 'Set a player-level state value for one or more bots. If the key is declared and exported by a loaded behavior, sets it directly; otherwise stores it as a preset for when a behavior declares it.',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      required: ['targets', 'id', 'key', 'value'],
+      required: ['targets', 'key', 'value'],
       properties: {
         targets: { oneOf: [
           { const: 'all' }, { type: 'string' }, { type: 'array', items: { type: 'string' } }
         ]},
-        id: { type: 'string' },
         key: { type: 'string' },
         value: { description: 'string | number | boolean | object (e.g. { x, y, z } for vec3)' }
       }
@@ -215,7 +214,7 @@ const HANDLERS = {
   apply_snippet:              (a)  => http('POST', '/api/snippets', { targets: a.targets, id: a.id, code: a.code }),
   unload_snippet:             (a)  => http('DELETE', '/api/snippets', { targets: a.targets, id: a.id }),
   save_snippet:               (a)  => http('POST', '/api/snippets/save', { id: a.id, code: a.code, dir: a.dir }),
-  set_state:                  (a)  => http('POST', '/api/state', { targets: a.targets, id: a.id, key: a.key, value: a.value }),
+  set_state:                  (a)  => http('POST', '/api/state', { targets: a.targets, key: a.key, value: a.value }),
   get_recent_events:    async (a)  => getRecentEvents(a?.limit ?? 50),
   get_viewer_url: async       (a)  => {
     const p = await http('GET', `/api/players/${encodeURIComponent(a.username)}`)
