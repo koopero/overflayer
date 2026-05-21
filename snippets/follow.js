@@ -27,7 +27,10 @@ run(async () => {
     }
 
     const { x, y, z } = player.entity.position
-    stateSet('navTarget', { x, y, z })
+    const prev = stateGet('navTarget')
+    if (!prev || Math.hypot(x - prev.x, z - prev.z) > 0.25) {
+      stateSet('navTarget', { x, y, z })
+    }
     await sleep(500)
   }
 })
