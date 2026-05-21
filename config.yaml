@@ -1,65 +1,34 @@
 # Overflayer config
-# Server defines the Minecraft endpoint all clients connect to.
-# Each entry under `players` spawns one bot with its own snippets.
-
 server:
   host: localhost
   port: 25565
-  version: auto   # or e.g. "1.20.4"
+  version: auto
 
 snippet_dirs:
-  - path: ./snippets/shared
-  - path: ./snippets/patroller
+  - path: ./snippets
+    writable: true
   - path: ./tmp/local_snippets
     writable: true
 
+# Infrastructure behaviors loaded on every bot at startup.
+# Task behaviors (follow, talk, equip, gather, build) are loaded on-demand.
+_defaults: &defaults
+  auth: offline
+  load:
+    - snippets/navigate.js
+    - snippets/eat.js
+    - snippets/look.js
 
 players:
-  - username: January
-    auth: offline
-    load: []
-
-  - username: February
-    auth: offline
-    load: []
-
-
-  - username: March
-    auth: offline
-    load: []
-
-  - username: April
-    auth: offline
-    load: [] 
-
-  - username: May
-    auth: offline
-    load: []
-
-  - username: June
-    auth: offline
-    load: []
-
-  - username: July
-    auth: offline
-    load: []  
-
-  - username: August
-    auth: offline
-    load: []
-
-  - username: September
-    auth: offline
-    load: []
-
-  - username: October
-    auth: offline
-    load: []
-
-  - username: November
-    auth: offline
-    load: []
-
-  - username: December
-    auth: offline
-    load: []
+  - { username: January,   <<: *defaults }
+  - { username: February,  <<: *defaults }
+  - { username: March,     <<: *defaults }
+  - { username: April,     <<: *defaults }
+  - { username: May,       <<: *defaults }
+  - { username: June,      <<: *defaults }
+  - { username: July,      <<: *defaults }
+  - { username: August,    <<: *defaults }
+  - { username: September, <<: *defaults }
+  - { username: October,   <<: *defaults }
+  - { username: November,  <<: *defaults }
+  - { username: December,  <<: *defaults }
