@@ -9,16 +9,10 @@ run(async () => {
     return stop('no-pathfinder')
   }
 
-  bot.on('goal_reached', () => {
-    stateSet('navStatus', 'arrived')
-    report({ kind: 'arrived' })
-  })
+  bot.on('goal_reached', () => stateSet('navStatus', 'arrived'))
 
   bot.on('path_update', (r) => {
-    if (r.status === 'noPath') {
-      stateSet('navStatus', 'failed')
-      report({ kind: 'no-path' })
-    }
+    if (r.status === 'noPath') stateSet('navStatus', 'failed')
   })
 
   let active = null   // last target we issued a setGoal for
@@ -41,7 +35,7 @@ run(async () => {
     if (moved) {
       bot.pathfinder.setGoal(new GoalNear(target.x, target.y, target.z, stateGet('navRadius') || 2))
       active = { ...target }
-      stateSet('navStatus', 'navigating')
+      if (stateGet('navStatus') !== 'navigating') stateSet('navStatus', 'navigating')
     }
 
     await sleep(200)
