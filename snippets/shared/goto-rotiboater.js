@@ -1,33 +1,42 @@
-const TARGET = 'rotiboater'
-const ARRIVED_RADIUS = 2
+stateConfigure('target', { type: 'player', export: true, default: 'rotiboater' })
+stateConfigure('radius', { type: 'number', export: true, default: 2 })
 
 run(async () => {
   if (!bot.pathfinder || !GoalNear) {
     report({ kind: 'fatal', reason: 'mineflayer-pathfinder is not loaded on this bot' })
-    return
+    return stop('no-pathfinder')
   }
 
   while (!signal.aborted) {
-    const player = bot.players[TARGET]
-    if (!player?.entity) {
-      report({ kind: 'waiting', target: TARGET, reason: 'not visible' })
+    const targetName = stateGet('target')
+    const radius = stateGet('radius') || 2
+
+    if (!targetName) {
+      report({ kind: 'idle', reason: 'no target set' })
       await sleep(2000)
       continue
     }
 
-    const { x, y, z } = player.entity.position
+    const target = bot.players[targetName]
+    if (!target?.entity) {
+      report({ kind: 'waiting', target: targetName, reason: 'not visible' })
+      await sleep(2000)
+      continue
+    }
+
+    const { x, y, z } = target.entity.position
     const me = bot.entity.position
     const dist = Math.hypot(me.x - x, me.y - y, me.z - z)
 
-    if (dist <= ARRIVED_RADIUS) {
-      report({ kind: 'arrived', target: TARGET, distance: dist, at: { x: me.x, y: me.y, z: me.z } })
-      stop('arrived')
-      return
+    if (dist <= radius) {
+      report({ kind: 'arrived', target: targetName, distance: dist, at: { x: me.x, y: me.y, z: me.z } })
+      await sleep(1000)
+      continue
     }
 
-    report({ kind: 'navigating', target: TARGET, distance: dist, to: { x, y, z } })
+    report({ kind: 'navigating', target: targetName, distance: dist, to: { x, y, z } })
     try {
-      await bot.pathfinder.goto(new GoalNear(x, y, z, ARRIVED_RADIUS))
+      await bot.pathfinder.goto(new GoalNear(x, y, z, radius))
     } catch (err) {
       if (err instanceof ScopeDisposedError) return
       report({ kind: 'pathfinder-error', message: String(err.message || err) })

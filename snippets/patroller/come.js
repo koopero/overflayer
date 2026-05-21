@@ -7,7 +7,7 @@ bot.on('chat', (username, message) => {
     if (!bot.pathfinder || !GoalNear) return bot.chat('No pathfinder available.')
     const { x, y, z } = player.entity.position
     bot.chat(`On my way, ${username}.`)
-    await bot.pathfinder.goto(new GoalNear(x, y, z, 2))
+    await bot.pathfinder.goto(new GoalNear(x, y, z, 6))
     bot.chat('Here!')
   })
 })

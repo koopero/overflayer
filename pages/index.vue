@@ -7,6 +7,7 @@
           v-for="p in players"
           :key="p.username"
           :player="p"
+          :catalog="catalog"
           :selected="selected.includes(p.username)"
           @toggle="toggle"
         />
@@ -22,7 +23,7 @@
         @loaded="onLoaded"
         @unloaded="onLoaded"
       />
-      <SnippetLibrary
+      <SnippetCatalog
         :selected="selected"
         @edit="onEdit"
         @changed="onLoaded"
@@ -43,11 +44,21 @@
 </template>
 
 <script setup>
-import { inject, ref, computed } from 'vue'
+import { inject, ref, computed, onMounted } from 'vue'
 
 const players = inject('players')
 const events = inject('events')
 const refresh = inject('refresh')
+
+const catalog = ref([])
+
+async function refreshCatalog () {
+  try {
+    catalog.value = await $fetch('/api/catalog')
+  } catch (_) {}
+}
+
+onMounted(refreshCatalog)
 
 const selected = ref([])
 const formRef = ref(null)

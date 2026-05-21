@@ -343,6 +343,87 @@ async function main () {
     assert.strictEqual(ov.inspect().length, 0)
   })
 
+  // --- state(): per-snippet, per-instance state with hot-reload persistence
+  await test('stateConfigure initialises from default', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    let captured = null
+    bot.report = (v) => { captured = v }
+    await ov.load('s', `
+      stateConfigure('target', { type: 'player', default: 'rotiboater', export: true })
+      bot.report(stateGet('target'))
+    `)
+    assert.strictEqual(captured, 'rotiboater')
+    const snap = ov.inspect()[0]
+    assert.deepStrictEqual(snap.state.target, { type: 'player', value: 'rotiboater', exported: true })
+  })
+
+  await test('stateGet/stateSet read and write inside the snippet', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const log = []
+    bot.log = (v) => log.push(v)
+    await ov.load('s', `
+      stateConfigure('count', { type: 'number', default: 0 })
+      bot.log(stateGet('count'))
+      stateSet('count', 5)
+      bot.log(stateGet('count'))
+    `)
+    assert.deepStrictEqual(log, [0, 5])
+  })
+
+  await test('state persists across hot-reload of the same id', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('s', `
+      stateConfigure('count', { type: 'number', default: 0 })
+      stateSet('count', 7)
+    `)
+    assert.strictEqual(ov.inspect()[0].state.count.value, 7)
+    // Hot-reload — same id, fresh code that reconfigures the same key.
+    let observed = null
+    bot.report = (v) => { observed = v }
+    await ov.load('s', `
+      stateConfigure('count', { type: 'number', default: 0 })
+      bot.report(stateGet('count'))
+    `)
+    assert.strictEqual(observed, 7, 'value should survive hot-reload')
+    assert.strictEqual(ov.inspect()[0].state.count.value, 7)
+  })
+
+  await test('explicit unload() drops state (no keepState)', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    await ov.load('s', `stateConfigure('x', { type: 'number', default: 1 }); stateSet('x', 99)`)
+    assert.strictEqual(ov.inspect()[0].state.x.value, 99)
+    ov.unload('s')
+    let observed = null
+    bot.report = (v) => { observed = v }
+    await ov.load('s', `stateConfigure('x', { type: 'number', default: 1 }); bot.report(stateGet('x'))`)
+    assert.strictEqual(observed, 1, 'after explicit unload, state resets to default')
+  })
+
+  await test('setExportedState rejects non-exported keys, accepts exported', async () => {
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const stateEvents = []
+    ov.on('state', (id, key, value, meta) => stateEvents.push({ id, key, value, source: meta.source }))
+    await ov.load('s', `
+      stateConfigure('priv', { type: 'string', default: 'a' })
+      stateConfigure('pub',  { type: 'string', default: 'b', export: true })
+    `)
+
+    assert.throws(() => ov.setExportedState('s', 'priv', 'x'), /not exported/)
+    assert.throws(() => ov.setExportedState('s', 'missing', 'x'), /not configured/)
+
+    const before = stateEvents.length
+    ov.setExportedState('s', 'pub', 'updated')
+    assert.strictEqual(ov.inspect()[0].state.pub.value, 'updated')
+    const newEvts = stateEvents.slice(before)
+    assert.strictEqual(newEvts.length, 1)
+    assert.deepStrictEqual(newEvts[0], { id: 's', key: 'pub', value: 'updated', source: 'api' })
+  })
+
   // --- 15. report(): snippets push data up to Overflayer
   await test('report() emits on overflayer and updates inspect()', async () => {
     const bot = makeFakeBot()
@@ -369,6 +450,148 @@ async function main () {
     await delay(5)
     // Nothing further added:
     assert.strictEqual(seen.length, 3)
+  })
+
+  // --- catalog: boot scan, change/delete propagation
+  await test('catalog: boot scan discovers .js files without loading them', async () => {
+    const { SessionManager } = require('../lib/SessionManager.js')
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-cat-'))
+    const dir1 = path.join(tmpRoot, 'a'); fs.mkdirSync(dir1)
+    fs.writeFileSync(path.join(dir1, 'alpha.js'), `report("alpha")`)
+    fs.writeFileSync(path.join(dir1, 'beta.js'),  `report("beta")`)
+
+    const sm = new SessionManager()
+    sm.config = { snippet_dirs: [{ path: dir1 }], players: [] }
+    sm.snippetDirs = sm._normalizeSnippetDirs(sm.config.snippet_dirs)
+    sm._scanCatalog()
+
+    const view = sm.catalogView()
+    assert.strictEqual(view.length, 2)
+    assert.deepStrictEqual(view.map(v => v.id).sort(), ['alpha', 'beta'])
+    assert.strictEqual(view.every(v => v.kind === 'file'), true)
+    assert.strictEqual(view.every(v => v.loadedOn.length === 0), true, 'discovery must not load anything')
+
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  await test('catalog: file change hot-reloads only sessions that have it loaded', async () => {
+    const { SessionManager } = require('../lib/SessionManager.js')
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-cat-'))
+    const dir1 = path.join(tmpRoot, 'a'); fs.mkdirSync(dir1)
+    const file = path.join(dir1, 'demo.js')
+    fs.writeFileSync(file, `bot.report("v1")`)
+
+    // Two synthetic sessions, each with a real Overflayer wrapping a fake bot.
+    const botA = makeFakeBot(); botA.report = (v) => { botA.last = v }
+    const botB = makeFakeBot(); botB.report = (v) => { botB.last = v }
+    const ovA = new Overflayer(botA)
+    const ovB = new Overflayer(botB)
+
+    const sm = new SessionManager()
+    sm.config = { snippet_dirs: [{ path: dir1 }], players: [] }
+    sm.snippetDirs = sm._normalizeSnippetDirs(sm.config.snippet_dirs)
+    sm._scanCatalog()
+    sm.sessions.set('A', { config: { username: 'A' }, bot: botA, ov: ovA, status: 'spawned' })
+    sm.sessions.set('B', { config: { username: 'B' }, bot: botB, ov: ovB, status: 'spawned' })
+
+    // Apply to A only.
+    const code = sm.catalog.get('demo').code
+    await ovA.load('demo', code === '' ? code : file)
+    // Run the synchronous bot.report from snippet:
+    assert.strictEqual(botA.last, 'v1')
+    assert.strictEqual(botB.last, undefined)
+
+    // Directly mutate the file and invoke the propagation path the watcher would.
+    fs.writeFileSync(file, `bot.report("v2")`)
+    sm._upsertCatalogFile(file, sm.snippetDirs[0])
+    sm._propagateChange(file)
+    await delay(20)
+    assert.strictEqual(botA.last, 'v2', 'A should hot-reload to v2')
+    assert.strictEqual(botB.last, undefined, 'B should not be touched')
+
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  await test('catalog: file delete unloads sessions that have it', async () => {
+    const { SessionManager } = require('../lib/SessionManager.js')
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-cat-'))
+    const dir1 = path.join(tmpRoot, 'a'); fs.mkdirSync(dir1)
+    const file = path.join(dir1, 'ghost.js')
+    fs.writeFileSync(file, `bot.report("hi")`)
+
+    const bot = makeFakeBot(); bot.report = () => {}
+    const ov = new Overflayer(bot)
+    const sm = new SessionManager()
+    sm.config = { snippet_dirs: [{ path: dir1 }], players: [] }
+    sm.snippetDirs = sm._normalizeSnippetDirs(sm.config.snippet_dirs)
+    sm._scanCatalog()
+    sm.sessions.set('A', { config: { username: 'A' }, bot, ov, status: 'spawned' })
+
+    await ov.load('ghost', file)
+    assert.strictEqual(ov.inspect().length, 1)
+
+    sm._removeCatalogFile(file)
+    assert.strictEqual(sm.catalog.has('ghost'), false)
+    assert.strictEqual(ov.inspect().length, 0, 'session should be unloaded after file delete')
+
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
+  })
+
+  // --- snippet_dirs: SessionManager normalizes, auto-mkdirs writable dirs, saveSnippetToDir works
+  await test('SessionManager saveSnippetToDir writes a file to a writable dir', async () => {
+    const { SessionManager } = require('../lib/SessionManager.js')
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'overflayer-sd-'))
+    const writableDir = path.join(tmpRoot, 'writable')   // does NOT exist yet
+    const readOnlyDir = path.join(tmpRoot, 'read-only')
+    fs.mkdirSync(readOnlyDir)
+
+    const sm = new SessionManager()
+    sm.config = {
+      snippet_dirs: [
+        { path: readOnlyDir },
+        { path: writableDir, writable: true }
+      ],
+      players: []
+    }
+    // start() requires mineflayer; do the side-effect we care about directly.
+    sm.snippetDirs = sm._normalizeSnippetDirs(sm.config.snippet_dirs)
+    // mkdir step from start():
+    for (const e of sm.snippetDirs) if (e.writable) fs.mkdirSync(e.path, { recursive: true })
+
+    assert.ok(fs.existsSync(writableDir), 'writable dir should be auto-created')
+    assert.deepStrictEqual(sm.snippetDirs, [
+      { path: readOnlyDir, writable: false },
+      { path: writableDir, writable: true }
+    ])
+
+    // Save succeeds in writable dir.
+    const out = sm.saveSnippetToDir({ id: 'demo', code: 'report("hello")', dir: writableDir })
+    assert.ok(out.absolute.endsWith(path.join('writable', 'demo.js')))
+    assert.strictEqual(fs.readFileSync(out.absolute, 'utf8'), 'report("hello")')
+
+    // Negative: writable=false dir is rejected.
+    assert.throws(
+      () => sm.saveSnippetToDir({ id: 'demo', code: 'x', dir: readOnlyDir }),
+      /not writable/
+    )
+
+    // Negative: unsafe id is rejected.
+    assert.throws(
+      () => sm.saveSnippetToDir({ id: '../escape', code: 'x', dir: writableDir }),
+      /must match/
+    )
+    assert.throws(
+      () => sm.saveSnippetToDir({ id: 'has space', code: 'x', dir: writableDir }),
+      /must match/
+    )
+
+    // Negative: unknown dir is rejected.
+    assert.throws(
+      () => sm.saveSnippetToDir({ id: 'demo', code: 'x', dir: '/etc/passwd' }),
+      /unknown snippet_dir/
+    )
+
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
   })
 
   console.log(`\n${passed} passed, ${failed} failed`)

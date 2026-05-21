@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "overflayer": {
+      "command": "node",
+      "args": ["bin/overflayer-mcp.js"],
+      "env": { "OVERFLAYER_URL": "http://localhost:3000" }
+    }
+  }
+}

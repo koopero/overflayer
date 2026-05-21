@@ -7,6 +7,13 @@ server:
   port: 25565
   version: auto   # or e.g. "1.20.4"
 
+snippet_dirs:
+  - path: ./snippets/shared
+  - path: ./snippets/patroller
+  - path: ./tmp/local_snippets
+    writable: true
+
+
 players:
   - username: January
     auth: offline
