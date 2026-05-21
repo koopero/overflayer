@@ -7,9 +7,9 @@
           v-for="p in players"
           :key="p.username"
           :player="p"
-          :catalog="catalog"
           :selected="selected.includes(p.username)"
           @toggle="toggle"
+          @changed="onLoaded"
         />
         <p v-if="players.length === 0" class="empty">No players (yet). Check config.yaml and the server log.</p>
       </div>
@@ -79,6 +79,7 @@ const recent = computed(() => events.value.slice().reverse().slice(0, 50))
 
 function summary (e) {
   if (e.type === 'report') return `${e.id}: ${typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload)}`
+  if (e.type === 'state') return `${e.key} = ${JSON.stringify(e.value)}${e.snippetId ? ` (${e.snippetId})` : ''}`
   if (e.type === 'load' || e.type === 'reload') return `${e.id} ← ${e.source}`
   if (e.type === 'unload') return e.id
   if (e.type === 'error' || e.type === 'bot:error') return `${e.id || ''} ${e.message || ''}`
