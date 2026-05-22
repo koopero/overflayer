@@ -1,6 +1,0 @@
-[mcp_servers.overflayer]
-command = "node"
-args = ["bin/overflayer-mcp.js"]
-
-[mcp_servers.overflayer.env]
-OVERFLAYER_URL = "http://localhost:3000"

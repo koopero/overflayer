@@ -9,7 +9,7 @@ declareState('navStatus',    { type: 'string', default: 'idle' })
 run(async () => {
   while (!signal.aborted) {
     if (stateGet('currentTask') !== 'gather') {
-      stateSet('navTarget', null)
+      if (stateGet('navTarget') !== null) stateSet('navTarget', null)
       await sleep(500)
       continue
     }

@@ -151,8 +151,9 @@ class Overflayer extends EventEmitter {
       stopRequested = true
       entry.stoppedReason = reason
       this.emit('stop', id, reason)
+      // keepState: true — stopping naturally preserves player-level state
       queueMicrotask(() => {
-        if (this.snippets.get(id) === entry) this.unload(id)
+        if (this.snippets.get(id) === entry) this.unload(id, { keepState: true })
       })
     }
 

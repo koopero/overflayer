@@ -10,25 +10,29 @@ snippet_dirs:
   - path: ./tmp/local_snippets
     writable: true
 
-# Infrastructure behaviors loaded on every bot at startup.
-# Task behaviors (follow, talk, equip, gather, build) are loaded on-demand.
 _defaults: &defaults
   auth: offline
   load:
     - snippets/navigate.js
     - snippets/eat.js
     - snippets/look.js
+    - snippets/follow.js
+    - snippets/talk.js
+    - snippets/equip.js
+    - snippets/gather.js
+    - snippets/build.js
+    - snippets/inspect.js
 
 players:
-  - { username: January,   <<: *defaults }
-  - { username: February,  <<: *defaults }
-  - { username: March,     <<: *defaults }
-  - { username: April,     <<: *defaults }
+  # - { username: January,   <<: *defaults }
+  # - { username: February,  <<: *defaults }
+  # - { username: March,     <<: *defaults }
+  # - { username: April,     <<: *defaults }
   - { username: May,       <<: *defaults }
-  - { username: June,      <<: *defaults }
-  - { username: July,      <<: *defaults }
-  - { username: August,    <<: *defaults }
-  - { username: September, <<: *defaults }
-  - { username: October,   <<: *defaults }
-  - { username: November,  <<: *defaults }
-  - { username: December,  <<: *defaults }
+  # - { username: June,      <<: *defaults }
+  # - { username: July,      <<: *defaults }
+  # - { username: August,    <<: *defaults }
+  # - { username: September, <<: *defaults }
+  # - { username: October,   <<: *defaults }
+  # - { username: November,  <<: *defaults }
+  # - { username: December,  <<: *defaults }

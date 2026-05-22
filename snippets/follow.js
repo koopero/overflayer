@@ -7,7 +7,7 @@ declareState('navRadius',   { type: 'number', export: true, default: 3 })
 run(async () => {
   while (!signal.aborted) {
     if (stateGet('currentTask') !== 'follow') {
-      stateSet('navTarget', null)
+      if (stateGet('navTarget') !== null) stateSet('navTarget', null)
       await sleep(500)
       continue
     }

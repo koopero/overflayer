@@ -9,10 +9,12 @@ run(async () => {
     return stop('no-pathfinder')
   }
 
-  bot.on('goal_reached', () => stateSet('navStatus', 'arrived'))
+  bot.on('goal_reached', () => {
+    if (stateGet('navStatus') !== 'arrived') stateSet('navStatus', 'arrived')
+  })
 
   bot.on('path_update', (r) => {
-    if (r.status === 'noPath') stateSet('navStatus', 'failed')
+    if (r.status === 'noPath' && stateGet('navStatus') !== 'failed') stateSet('navStatus', 'failed')
   })
 
   let active = null   // last target we issued a setGoal for
@@ -24,7 +26,7 @@ run(async () => {
       if (active) {
         try { bot.pathfinder.setGoal(null) } catch (_) {}
         active = null
-        stateSet('navStatus', 'idle')
+        if (stateGet('navStatus') !== 'idle') stateSet('navStatus', 'idle')
       }
       await sleep(100)
       continue
