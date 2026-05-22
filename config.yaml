@@ -1,7 +1,7 @@
 # Overflayer config
 server:
-  host: localhost
-  port: 25565
+  host: quantahedron.biz
+  port: 25566
   version: auto
 
 snippet_dirs:
@@ -22,13 +22,14 @@ _defaults: &defaults
     - snippets/gather.js
     - snippets/build.js
     - snippets/inspect.js
+    - snippets/defend.js
 
 players:
-  # - { username: January,   <<: *defaults }
-  # - { username: February,  <<: *defaults }
+  - { username: January,   <<: *defaults }
+  - { username: February,  <<: *defaults }
   # - { username: March,     <<: *defaults }
   # - { username: April,     <<: *defaults }
-  - { username: May,       <<: *defaults }
+  # - { username: May,       <<: *defaults }
   # - { username: June,      <<: *defaults }
   # - { username: July,      <<: *defaults }
   # - { username: August,    <<: *defaults }

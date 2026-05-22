@@ -247,6 +247,25 @@ function kitMissing () {
     .filter(k => k.short > 0)
 }
 
+// Find surface-exposed stone (cliff/hillside) rather than underground blocks.
+// Returns the Vec3 position of the best candidate, or null.
+function findSurfaceStone (maxDist = 48) {
+  const STONE_NAMES = ['stone','granite','diorite','andesite']
+  const stoneIds = new Set(STONE_NAMES.map(bid).filter(Boolean))
+  const DIRS = [new Vec3(1,0,0), new Vec3(-1,0,0), new Vec3(0,0,1), new Vec3(0,0,-1)]
+  let best = null, bestScore = -1
+  for (const id of stoneIds) {
+    const positions = bot.findBlocks({ matching: id, maxDistance: maxDist, count: 30 })
+    for (const pos of positions) {
+      const exposed  = DIRS.some(d => bot.blockAt(pos.plus(d))?.name === 'air')
+      const nearSurf = pos.y >= bot.entity.position.y - 10
+      const score    = (exposed ? 2 : 0) + (nearSurf ? 1 : 0)
+      if (score > bestScore) { best = pos; bestScore = score }
+    }
+  }
+  return best
+}
+
 bot.kit = {
   iid, bid,
   LOG_NAMES, PLANK_NAMES,
@@ -258,6 +277,7 @@ bot.kit = {
   PICK_ORDER, SWORD_ORDER, SHOVEL_ORDER,
   takeFromHome,
   STANDARD_KIT, kitMissing,
+  findSurfaceStone,
 }
 
 run(async () => {

@@ -17,7 +17,18 @@ async function http (method, route, body) {
   const url = `${BASE}${route}`
   const init = { method, headers: { 'content-type': 'application/json' } }
   if (body !== undefined) init.body = JSON.stringify(body)
-  const res = await fetch(url, init)
+  let res
+  try {
+    res = await fetch(url, init)
+  } catch (err) {
+    // fetch() throws a TypeError with the real reason (ECONNREFUSED, DNS, etc.)
+    // hidden in err.cause. Surface it so callers don't just see "fetch failed".
+    const cause = err && err.cause
+    const detail = cause && (cause.code || cause.message)
+      ? `${cause.code || ''}${cause.code && cause.message ? ': ' : ''}${cause.message || ''}`.trim()
+      : (err && err.message) || String(err)
+    throw new Error(`${method} ${url} failed to connect: ${detail} (is the overflayer server running at ${BASE}?)`)
+  }
   const text = await res.text()
   if (!res.ok) {
     let msg = res.statusText || `HTTP ${res.status}`

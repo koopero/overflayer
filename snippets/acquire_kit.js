@@ -76,6 +76,7 @@ run(async () => {
       ['stone_pickaxe','iron_pickaxe','diamond_pickaxe','netherite_pickaxe'].includes(i.name))
   }
 
+
   async function ensureMiningCapable () {
     if (hasIronCapablePickaxe()) { await k.equipBestPickaxe(); return true }
 
@@ -89,18 +90,30 @@ run(async () => {
     await k.equipBestPickaxe()
 
     if (k.invCount('cobblestone') < 3) {
-      const STONE_NAMES = ['stone','granite','diorite','andesite']
-      const stoneIds = new Set(STONE_NAMES.map(k.bid).filter(Boolean))
       if (bot.pathfinder?.movements) {
-        bot.pathfinder.movements.canDig = true
+        bot.pathfinder.movements.canDig  = true
+        bot.pathfinder.movements.digCost = 128
         bot.pathfinder.movements.maxDropDown = 4
       }
+      let stoneStreak = 0
       while (!signal.aborted && k.invCount('cobblestone') < 3) {
-        const b = bot.findBlock({ matching: b => stoneIds.has(b.type), maxDistance: 48 })
-        if (!b) { report({ kind: 'searching', for: 'stone' }); await sleep(3000); continue }
-        await k.goto(b.position.x, b.position.y, b.position.z, { radius: 3 })
+        const stonePos = k.findSurfaceStone(48)
+        if (!stonePos) {
+          stoneStreak++
+          report({ kind: 'searching', for: 'surface-stone', streak: stoneStreak })
+          if (stoneStreak >= 3) {
+            const me = bot.entity.position
+            await k.goto(me.x + (Math.random()-0.5)*60, me.y, me.z + (Math.random()-0.5)*60, { radius: 5, timeout: 20000 })
+            stoneStreak = 0
+          } else {
+            await sleep(2000)
+          }
+          continue
+        }
+        stoneStreak = 0
+        await k.goto(stonePos.x, stonePos.y, stonePos.z, { radius: 3 })
         if (signal.aborted) return false
-        const block = bot.blockAt(b.position)
+        const block = bot.blockAt(stonePos)
         if (!block || block.name === 'air') continue
         await k.equipBestPickaxe()
         try { await bot.dig(block); await sleep(300) }
@@ -127,7 +140,8 @@ run(async () => {
   async function mineIron (qty) {
     await k.equipBestPickaxe()
     if (bot.pathfinder?.movements) {
-      bot.pathfinder.movements.canDig = true
+      bot.pathfinder.movements.canDig  = true
+      bot.pathfinder.movements.digCost = 128
       bot.pathfinder.movements.maxDropDown = 4
     }
     const isOre = b => b.name === 'iron_ore' || b.name === 'deepslate_iron_ore'
@@ -138,7 +152,12 @@ run(async () => {
       if (!b) {
         searchStreak++
         report({ kind: 'searching', for: 'iron', streak: searchStreak })
-        if (searchStreak >= 3) return mined          // give up if we can't find any nearby
+        if (searchStreak >= 3) {
+          // Wander to expose new chunks, then retry once
+          const me = bot.entity.position
+          await k.goto(me.x + (Math.random()-0.5)*80, me.y, me.z + (Math.random()-0.5)*80, { radius: 5, timeout: 25000 })
+          searchStreak = 0
+        }
         await sleep(3000)
         continue
       }
