@@ -1,0 +1,27 @@
+[mcp_servers.local]
+enabled = true
+url = "http://localhost:3000/api/mcp"
+
+[mcp_servers.local.tools.list_players]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.read_snippet_globals_docs]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.list_catalog]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.get_player]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.get_recent_events]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.list_snippet_dirs]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.save_snippet]
+approval_mode = "approve"
+
+[mcp_servers.local.tools.apply_snippet]
+approval_mode = "approve"

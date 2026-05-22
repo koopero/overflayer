@@ -220,6 +220,27 @@ async function main () {
     await ov.close()
   })
 
+  await test('SessionManager player summaries omit snippet source code', async () => {
+    const { SessionManager } = require('../lib/SessionManager.js')
+    const bot = makeFakeBot()
+    const ov = new Overflayer(bot)
+    const code = `bot.on('chat', () => bot.chat('secret'))`
+    await ov.load('secret', code)
+
+    const sm = new SessionManager()
+    sm.config = { server: { host: 'localhost' }, players: [] }
+    sm.sessions.set('TestBot', { config: { username: 'TestBot' }, bot, ov, status: 'spawned' })
+
+    const listed = sm.list()[0]
+    const detail = sm.get('TestBot')
+    assert.strictEqual(listed.snippets[0].code, undefined)
+    assert.strictEqual(detail.snippets[0].code, undefined)
+    assert.strictEqual(detail.snippets[0].codeLength, code.length)
+    assert.strictEqual(ov.inspect()[0].code, code)
+
+    await ov.close()
+  })
+
   // --- 12. bot.end() and bot.quit() are denied
   await test('bot.end() / bot.quit() throw in snippet scope', async () => {
     const bot = makeFakeBot()

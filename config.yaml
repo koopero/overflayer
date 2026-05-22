@@ -27,8 +27,8 @@ _defaults: &defaults
 players:
   - { username: January,   <<: *defaults }
   - { username: February,  <<: *defaults }
-  # - { username: March,     <<: *defaults }
-  # - { username: April,     <<: *defaults }
+  - { username: March,     <<: *defaults }
+  - { username: April,     <<: *defaults }
   # - { username: May,       <<: *defaults }
   # - { username: June,      <<: *defaults }
   # - { username: July,      <<: *defaults }
