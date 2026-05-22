@@ -2,9 +2,11 @@
 'use strict'
 
 const fs = require('fs')
+const { createServer: createHttpServer } = require('http')
 const path = require('path')
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js')
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js')
+const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js')
 const { ListToolsRequestSchema, CallToolRequestSchema } = require('@modelcontextprotocol/sdk/types.js')
 
 const BASE = (process.env.OVERFLAYER_URL || 'http://localhost:3000').replace(/\/+$/, '')
@@ -223,41 +225,159 @@ const HANDLERS = {
   }
 }
 
-const server = new Server(
-  { name: 'overflayer', version: '0.1.0' },
-  { capabilities: { tools: {} } }
-)
+// Factory so each transport (stdio: one instance; http: one per request in stateless mode)
+// gets its own Server with handlers registered.
+function createMcpServer () {
+  const server = new Server(
+    { name: 'overflayer', version: '0.1.0' },
+    { capabilities: { tools: {} } }
+  )
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { name, arguments: args = {} } = req.params
-  const handler = HANDLERS[name]
-  if (!handler) {
-    return {
-      isError: true,
-      content: [{ type: 'text', text: `unknown tool: ${name}` }]
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const { name, arguments: args = {} } = req.params
+    const handler = HANDLERS[name]
+    if (!handler) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `unknown tool: ${name}` }]
+      }
     }
-  }
-  try {
-    const result = await handler(args)
-    const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-    return { content: [{ type: 'text', text }] }
-  } catch (err) {
-    return {
-      isError: true,
-      content: [{ type: 'text', text: String(err && err.message ? err.message : err) }]
+    try {
+      const result = await handler(args)
+      const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+      return { content: [{ type: 'text', text }] }
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: String(err && err.message ? err.message : err) }]
+      }
     }
-  }
-})
+  })
 
-async function main () {
+  return server
+}
+
+// ---- transports ----
+
+async function runStdio () {
+  const server = createMcpServer()
   const transport = new StdioServerTransport()
   await server.connect(transport)
 }
 
+async function runHttp (port, host) {
+  // Stateless: each POST/GET to /mcp gets its own Server + Transport pair, no
+  // session state carried across requests. Simpler and matches the SDK's
+  // documented stateless pattern.
+  const httpServer = createHttpServer(async (req, res) => {
+    // CORS + health probes
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'access-control-allow-origin': '*',
+        'access-control-allow-methods': 'POST, GET, DELETE, OPTIONS',
+        'access-control-allow-headers': 'content-type, mcp-session-id, mcp-protocol-version'
+      })
+      res.end()
+      return
+    }
+    const url = req.url || '/'
+    if (url === '/' || url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, name: 'overflayer-mcp', endpoint: '/mcp' }))
+      return
+    }
+    if (!url.startsWith('/mcp')) {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('not found — MCP endpoint is at /mcp')
+      return
+    }
+
+    const server = createMcpServer()
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+    try {
+      await server.connect(transport)
+      await transport.handleRequest(req, res)
+      // Clean up after the response cycle completes.
+      res.on('close', () => {
+        try { transport.close() } catch (_) {}
+        try { server.close() } catch (_) {}
+      })
+    } catch (err) {
+      process.stderr.write(`[overflayer-mcp] http handler error: ${err && err.stack ? err.stack : err}\n`)
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err && err.message ? err.message : err) }))
+      }
+    }
+  })
+
+  await new Promise((resolve, reject) => {
+    httpServer.once('error', reject)
+    httpServer.listen(port, host, () => {
+      httpServer.off('error', reject)
+      resolve()
+    })
+  })
+  // Stderr only to avoid corrupting any wrapping stdio listener.
+  process.stderr.write(`[overflayer-mcp] listening on http://${host}:${port}/mcp\n`)
+}
+
+// ---- arg/env parsing ----
+
+function parseArgs (argv) {
+  const out = { http: null, host: '127.0.0.1' }
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--http' || a === '-h') {
+      const next = argv[i + 1]
+      const p = Number(next)
+      if (!next || Number.isNaN(p)) throw new Error('--http requires a port number')
+      out.http = p
+      i++
+    } else if (a.startsWith('--http=')) {
+      const p = Number(a.slice(7))
+      if (Number.isNaN(p)) throw new Error('--http requires a port number')
+      out.http = p
+    } else if (a === '--host') {
+      out.host = argv[++i]
+    } else if (a.startsWith('--host=')) {
+      out.host = a.slice(7)
+    } else if (a === '--help') {
+      process.stderr.write([
+        'Usage: overflayer-mcp [--http <port>] [--host <addr>]',
+        '',
+        '  stdio (default): JSON-RPC frames over stdin/stdout',
+        '  --http <port>:   listen for MCP requests at http://<host>:<port>/mcp',
+        '  --host <addr>:   bind host for HTTP mode (default 127.0.0.1)',
+        '',
+        'Env vars:',
+        '  OVERFLAYER_URL    base URL for the overflayer REST API (default http://localhost:3000)',
+        '  MCP_HTTP_PORT     equivalent to --http',
+        '  MCP_HTTP_HOST     equivalent to --host',
+        ''
+      ].join('\n'))
+      process.exit(0)
+    }
+  }
+  if (out.http == null && process.env.MCP_HTTP_PORT) {
+    const p = Number(process.env.MCP_HTTP_PORT)
+    if (Number.isNaN(p)) throw new Error('MCP_HTTP_PORT must be a number')
+    out.http = p
+  }
+  if (process.env.MCP_HTTP_HOST) out.host = process.env.MCP_HTTP_HOST
+  return out
+}
+
+async function main () {
+  const opts = parseArgs(process.argv)
+  if (opts.http) await runHttp(opts.http, opts.host)
+  else await runStdio()
+}
+
 main().catch(err => {
-  // stderr only — never write to stdout (reserved for JSON-RPC frames).
+  // stderr only — never write to stdout (reserved for JSON-RPC frames in stdio mode).
   process.stderr.write(`[overflayer-mcp] fatal: ${err && err.stack ? err.stack : err}\n`)
   process.exit(1)
 })
